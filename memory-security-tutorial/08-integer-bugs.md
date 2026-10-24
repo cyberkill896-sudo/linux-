@@ -84,8 +84,38 @@ The dangerous version is when the **allocation** uses the wrapped product but a
 char *p = malloc(count * size);               // wraps -> small
 for (size_t i=0;i<count;i++) p[i*size]=0;     // writes count*size real bytes -> OOB
 ```
-**Fix:** `calloc(count,size)` (checks the multiply), or
-`if (size && count > SIZE_MAX/size) abort();`, or `__builtin_mul_overflow`.
+**Why this is the single most common integer→memory bug.** "Allocate room for
+`count` items of `size` bytes" is one of the most frequent operations in all of
+software, and the natural way to write it — `malloc(count * size)` — is exactly
+the bug. `count` and/or `size` often come from input (a file header's "number of
+entries," a protocol's "array length"). If their product exceeds `SIZE_MAX`, it
+**wraps** to a small number, `malloc` cheerfully returns a small buffer, and then
+the code writes `count` full items into it.
+
+**Concrete numbers (64-bit).** Say `size = 16` and the attacker sends
+`count = 0x1000000000000001`. The true product is `0x10000000000000010`, which is
+65 bits; truncated to 64 bits it's `0x10` = **16 bytes**. So `malloc(16)`
+succeeds, but the loop writes `count` × 16 bytes ≈ 18 exabytes' worth of
+iterations, overflowing after the first 16 bytes. On 32-bit it's even easier:
+`count = 0x40000000, size = 4` → product wraps to **0**.
+
+**The crucial subtlety** shown in the two snippets: if the *same* wrapped
+expression is used for both the allocation and the copy, you "only" under-copy
+(still wrong, but not an overflow). The classic **exploitable** form is when the
+allocation uses the product but a **loop or a second copy uses the real
+`count`** (as in `for (i=0;i<count;i++)`), so the writes use the true,
+un-wrapped count against a buffer sized by the wrapped one. Always check whether
+"how big I allocated" and "how much I write" can diverge.
+
+**Fix — prefer the API that can't get it wrong:**
+- `calloc(count, size)` — checks `count * size` for overflow and returns `NULL`
+  instead of under-allocating (and zeroes, killing uninitialized-read leaks).
+- `reallocarray(ptr, count, size)` — the `realloc` equivalent with the same check.
+- Explicit guard: `if (size != 0 && count > SIZE_MAX / size) { /* reject */ }`
+  before multiplying (division can't overflow, so this is safe).
+- `__builtin_mul_overflow(count, size, &total)` — returns true on overflow;
+  portable and clear.
+- Build with `-fsanitize=undefined` to trap signed-overflow versions at runtime.
 
 ---
 
@@ -114,9 +144,40 @@ int read_data(int len){               // len is SIGNED and attacker-controlled
     memcpy(buf, src, len);             // memcpy's 3rd arg is size_t (UNSIGNED)
 }
 ```
-Send `len = -1`. The check `-1 > 128` is **false** (passes!), but `memcpy`
-converts `-1` to `size_t` = `0xFFFF...FF` → enormous copy → overflow. **Fix:** use
-an **unsigned** length and check both ends: `if (len == 0 || len > sizeof buf)`.
+**Why this one fools almost everyone.** The check `if (len > 128) return -1;`
+*looks* complete — "reject anything bigger than the buffer." The trap is that
+`len` is **signed** (`int`), but `memcpy`'s third parameter is **`size_t`**
+(unsigned). C silently converts between them, and the conversion of a negative
+signed value to unsigned is defined to **wrap**: `-1` becomes the largest
+`size_t`, `0xFFFFFFFFFFFFFFFF`.
+
+Trace `len = -1`:
+- `len > 128` is the comparison `-1 > 128` in signed arithmetic → **false**, so
+  the guard does *not* trigger. The attacker sailed past the "safety" check.
+- `memcpy(buf, src, len)` passes `len` where a `size_t` is expected, so `-1` is
+  converted to `0xFFFF...FF` ≈ 16 exabytes → `memcpy` tries to copy essentially
+  all of memory into a 128-byte stack buffer → immediate massive overflow/crash
+  (and, with the right source, a controlled overwrite before the crash).
+
+The deep point: **a single value can satisfy a signed upper-bound check and
+simultaneously be a gigantic unsigned size.** The guard only bounded the *top*;
+it never bounded the *bottom*, and the type the value is *used* as differs from
+the type it was *checked* as. This exact pattern is in real CVEs (it's one shape
+of the getaddrinfo and many driver bugs).
+
+**How to see it in the disassembly** (ties to §8.12): the check compiles to a
+**signed** branch (`cmp edi, 128 ; jg fail` — `jg` = "jump if greater, signed"),
+so `-1` doesn't take it; the `memcpy` size is then sign-extended into a 64-bit
+register (`movsxd`/`cdqe`) producing `0xFFFF...FF`. Seeing `jg` where the value
+can be attacker-negative is the red flag.
+
+**Fix — three parts:**
+1. Use an **unsigned** type for lengths/sizes (`size_t`), so "negative" can't
+   happen.
+2. Check **both ends**: `if (len == 0 || len > sizeof buf) return -1;`
+   (or with a signed input kept, `if (len < 0 || len > (int)sizeof buf)`).
+3. Compile with `-Wsign-conversion -Wsign-compare` (warns at the mismatch) and
+   `-fsanitize=undefined` (traps the bad conversion at runtime).
 
 ---
 
