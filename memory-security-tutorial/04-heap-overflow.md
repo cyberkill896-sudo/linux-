@@ -65,9 +65,30 @@ int main(void){
     free(a); free(b);
 }
 ```
-The write past `a` runs through `a`'s remaining space, through `b`'s chunk header
-(`prev_size`/`size`), into `b`'s data. If `b` held something trusted, it's now
-attacker-controlled.
+**Walk it with the chunk picture from Chapter 3.** `malloc(24)` twice gives two
+lockers of chunk size `0x20`, and because the allocator carves them from the same
+region in order, `b` sits right above `a` (the program prints `gap` to show this;
+it's typically `0x20`). Memory looks like:
+
+```
+   a's user data (24 bytes)  |  b's chunk header (prev_size,size)  |  b's user data
+   ^ strcpy starts here, writing 32 'A's -----------> runs through all of this
+```
+
+`strcpy(a, <32 A's>)` writes 32 bytes starting at `a`. The first 24 fill `a`'s
+own locker; bytes 24–31 spill **past `a`**, first over `b`'s chunk header (the
+`size`/`prev_size` metadata the clerk uses) and then into `b`'s user data — which
+is why `printf("b = %s")` now shows `A`s even though nobody wrote to `b`.
+
+**Why it matters:** there's no return address up here (that's the stack), but `b`
+is a *real object the program will use later*. If `b` holds a length, a flag, a
+pointer, or (next test case) a function pointer, the overflow just handed its
+contents to the attacker. And because you also trampled `b`'s chunk header, the
+later `free(b)` may abort with "corrupted size vs. prev_size" — the allocator
+noticing its bookkeeping was wrecked. (Try uncommenting the frees to see it.)
+
+**Fix:** write no more than the locker holds — `memcpy(a, src, n <= 24 ? n : 24)`
+— and track sizes explicitly; prefer `calloc` for arrays (Chapter 3).
 
 ---
 
@@ -94,8 +115,31 @@ gcc -g -O0 h02_fnptr.c -o h02
 objdump -d h02 | grep '<danger>:'
 ./h02 $(python3 -c 'import sys;sys.stdout.buffer.write(b"A"*16+b"\x?? ...")')
 ```
-This is the heap analogue of a return-address overwrite: **a corrupted code
-pointer**. In C++ the corrupted pointer is often a **vtable pointer** (Chapter 10).
+**Why this is the heap's version of ret2win.** The struct `widget` places a
+buffer `name[16]` immediately before a **function pointer `action`** (fields are
+laid out in declaration order, Chapter 2 test 12). So the single locker for `w`
+looks like: `[ name: 16 bytes ][ action: 8 bytes ]`. `strcpy(w->name, v[1])` with
+no bound writes past `name` straight into `action`. The attacker supplies 16
+filler bytes then the 8-byte address of `danger` (little-endian), and the very
+next line, `w->action()`, calls it.
+
+Notice there was **no `free`, no return address, no stack** involved — just one
+heap object whose code pointer sits after an overflowable buffer. This is exactly
+how it works in C++ too, except the code pointer is the object's hidden **vtable
+pointer** at offset 0 (Chapter 10), which is why heap overflows and
+use-after-frees so reliably become code execution in browsers.
+
+**The payload (why the bytes look the way they do):**
+```bash
+objdump -d h02 | grep '<danger>:'        # e.g. 0000000000401162 <danger>:
+./h02 "$(python3 -c 'import sys,struct; sys.stdout.buffer.write(b"A"*16 + struct.pack("<Q", 0x401162))')"
+```
+16 `A`s reach `action`; `struct.pack("<Q", addr)` writes the 8-byte
+little-endian address over it. (Built `-no-pie` so `danger`'s address is fixed.)
+
+**Fix:** `snprintf(w->name, sizeof w->name, "%s", v[1])` so the write can never
+reach `action`; put pointers before buffers; and `-fsanitize=cfi` aborts a call
+through a corrupted pointer.
 
 ---
 
@@ -108,9 +152,23 @@ void grow(struct buf *b, char *src){
     memcpy(b->data, src, b->len);   // if a PRECEDING overflow set b->len huge...
 }
 ```
-A small overflow that corrupts a neighboring object's **length** turns a later,
-"well-behaved" `memcpy(dst, src, obj->len)` into a huge overflow. Watch for any
-length that lives in heap memory that another buffer could reach.
+**The two-step amplification.** On its own this `grow` function looks safe — it
+copies exactly `b->len` bytes, a bound. The danger is that `b->len` lives in heap
+memory, so a *different* bug (an overflow of whatever object sits just below this
+`struct buf`) can first overwrite `b->len` with a huge value. Then this
+"well-behaved" `memcpy(b->data, src, b->len)` copies that huge amount → a massive
+heap overflow — and the code that does it contains no obvious bug at all.
+
+This is why length/size fields stored in attacker-reachable memory are dangerous:
+a tiny initial overflow (even one byte, next test case) that changes a length
+becomes a *large* controlled overflow at the point the length is used. Auditors
+learn to flag "a size read from a struct that another buffer could overflow
+into."
+
+**Fix:** keep lengths out of overflowable reach where possible, re-validate a
+size against the real buffer capacity right before using it
+(`if (b->len > sizeof b->data) abort();`), and don't trust any in-memory length
+you didn't just compute yourself.
 
 ---
 
@@ -123,10 +181,26 @@ char *b = malloc(0x18);
 strcpy(a, big_24_byte_string); // writes a[0..23]; a[24] = '\0' is 1 past
                                // -> clears the low byte of b's size field
 ```
-A single NUL written past `a` flips `b`'s `size` low byte (e.g. `0x21`→`0x00`),
-corrupting the chunk-size/PREV_INUSE bookkeeping. The **"poison null byte"** and
-**"off-by-one"** techniques build full exploits from this one byte by creating
-**overlapping chunks**. Lesson: on the heap, *one byte is a real primitive*.
+**How one byte becomes a weapon.** A very common off-by-one is writing the string
+terminator one byte too far: you fill a 24-byte (`0x18`) buffer with a 24-byte
+string and `strcpy` also writes the `'\0'` at index 24 — one past the end. From
+Chapter 3, the byte right after `a`'s user data is the **low byte of the next
+chunk's `size` field**. Recall a `size` of `0x21` means "chunk size `0x20`, with
+the PREV_INUSE bit set." Overwriting its low byte with `0x00` turns `0x21` into
+`0x00` (or, in the classic version, clears just the PREV_INUSE bit), corrupting
+the allocator's idea of chunk sizes and whether the previous chunk is in use.
+
+**Why attackers love it.** By lying about a chunk's size or its "previous chunk
+is free" bit, the attacker tricks `free`/`malloc` into **merging or overlapping
+chunks** — ending up with two allocations that share memory (an "overlapping
+chunks" primitive, Chapter 5). From there they edit one allocation to rewrite the
+other's header / function pointer / length. Whole published exploits ("poison
+null byte," House of Einherjar) are built from this *single* out-of-bounds NUL.
+
+**The lesson for a defender:** on the heap, an off-by-one is **not** a minor
+cosmetic bug — one byte into the allocator's metadata is a real exploitation
+primitive. Reserve room for the terminator (`strcpy` needs `size-1` of payload),
+use `snprintf`, and test with ASan, which flags the single-byte write instantly.
 
 ---
 
