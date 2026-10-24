@@ -6,6 +6,48 @@
 
 ---
 
+## 8.0 In plain words (start here)
+
+Computer integers are not like math integers. A math integer can be any size; a
+computer integer lives in a **fixed number of bits** (commonly 32 or 64), so it
+can only hold numbers up to a limit. When a calculation goes past that limit,
+the value doesn't error — it silently **wraps around**, like a car odometer
+rolling from 999999 back to 000000.
+
+Two everyday examples:
+- A 32-bit **unsigned** integer holds 0 up to 4,294,967,295. Add 1 to the max and
+  it wraps to **0**. Subtract 1 from 0 and it wraps to **4,294,967,295**.
+- Assigning a big number into a **smaller** type keeps only the low bits:
+  storing 65537 into a 16-bit value gives **1**.
+
+By themselves these are just wrong numbers. They become *memory* bugs when that
+wrong number is used as a **size** (how many bytes to allocate or copy) or an
+**index** (which element to touch). The classic disaster:
+
+```c
+char *p = malloc(count * size);   // count and size come from input
+memcpy(p, src, count * size);     // copy that many bytes
+```
+
+If `count * size` is big enough to wrap, `malloc` is asked for a *tiny* amount
+(say 4 bytes), succeeds, and then `memcpy` copies the *real* huge amount into
+that tiny buffer → heap overflow (Chapter 4). The program never sees an error;
+the multiplication just lied.
+
+So the mental model for this whole chapter is: **an integer bug is a setup
+move.** On its own it's a wrong number; combined with an allocation, a copy, or
+an array index it becomes an overflow (Chapter 2/4), an out-of-bounds access
+(Chapter 9), or an under-allocation. The five ways numbers go wrong are listed
+next (§8.1), and each test case shows the wrong number turning into a real memory
+bug.
+
+Why these are so easy to miss: they're invisible in the C source (the code looks
+like normal arithmetic) and there's no runtime error by default. You find them by
+reasoning about limits, by using `calloc`/overflow-checked helpers, and by
+running under **UBSan** (`-fsanitize=undefined`), which *does* flag the wrap.
+
+---
+
 ## 8.1 The five integer hazards
 
 1. **Overflow** — result exceeds the type's max and **wraps** (`0xFFFFFFFF+1 = 0`).

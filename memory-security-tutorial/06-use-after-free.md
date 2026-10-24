@@ -6,6 +6,43 @@
 
 ---
 
+## 6.0 In plain words (start here)
+
+Back to the storeroom analogy (Chapter 3). You ask the clerk for a locker and get
+a key (`p = malloc(...)`). Later you say "I'm done" (`free(p)`) and the clerk
+takes the locker back to hand to someone else. **But you kept a copy of the
+key.** A **use-after-free** is using that old key *after* you returned the
+locker.
+
+Why is that dangerous and not just wrong? Because the clerk may have already
+given your old locker to **someone else's request**, who filled it with *their*
+stuff. When you (or an attacker-triggered code path) use your stale key:
+
+- **reading** through it shows you the new occupant's data — maybe a secret, or a
+  memory address that defeats ASLR (an *info leak*);
+- **writing** through it corrupts the new occupant's object;
+- and most dangerously, if the object stored a **function pointer** and the new
+  occupant is attacker-controlled data, then the program "calls the function" at
+  an address the attacker chose → code execution.
+
+A pointer like this — one that still points at memory that has been freed — is
+called a **dangling pointer**. The attacker's standard trick is the **reclaim**:
+(1) get the program to free the victim object, (2) immediately make a *same-size*
+allocation they control so the clerk hands back that exact locker filled with
+*their* bytes, (3) get the program to use the dangling pointer. Step 2 works
+because of the predictable reuse from Chapter 3.
+
+Two close cousins live in this chapter: **double-free** (saying "I'm done" with
+the same locker twice, which corrupts the clerk's free list) and **dangling stack
+pointers** (keeping the address of a local after its function returned — the
+stack version of the same lifetime mistake).
+
+The single cheapest habit that kills most of these: after `free(p)`, set
+`p = NULL`. Then using the stale key crashes immediately and obviously instead of
+silently touching someone else's locker. §6.15 covers the real fixes.
+
+---
+
 ## 6.1 What it is
 
 A **use-after-free (UAF)** uses a pointer **after** its memory was `free`d. The

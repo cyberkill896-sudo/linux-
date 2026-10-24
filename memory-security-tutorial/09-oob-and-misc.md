@@ -1,8 +1,42 @@
 # Chapter 9 — Out-of-Bounds, Uninitialized Memory & Misc Bugs
 
-> The remaining core classes the user asked to see explained *deeply*: OOB read
-> (Heartbleed), OOB write, uninitialized memory, NULL/wild pointers, memory
-> leaks, and stack exhaustion. Each gets full "why/how/test cases/impact/fix".
+> The remaining core classes, explained *deeply*: OOB read (Heartbleed), OOB
+> write, uninitialized memory, NULL/wild pointers, memory leaks, and stack
+> exhaustion. Each gets a full "why / how / test cases / impact / fix".
+
+---
+
+## 9.0 In plain words (start here)
+
+This chapter collects the memory bugs that aren't overflows-into-return-addresses
+but matter just as much. The unifying idea, again, is Chapter 1's boxes:
+touching boxes you shouldn't, or trusting boxes you never set.
+
+- **Out-of-bounds (OOB) read** — reading boxes *past the end* of your data. You
+  don't corrupt anything, but you *see* whatever was in the neighboring boxes:
+  another user's data, a password, or a memory address. That's an **information
+  leak** — and leaks are half of every modern exploit (they defeat ASLR). This is
+  literally what Heartbleed was: a server handed back memory past the end of the
+  real reply.
+- **Out-of-bounds write** — the corrupting twin: writing to a box outside your
+  array because the index was wrong. An attacker-chosen index is a "write
+  anything, anywhere" primitive.
+- **Uninitialized memory** — reading a box *before you put anything in it*. In C,
+  a fresh local variable or a `malloc`'d buffer contains **leftover bytes from
+  whatever used that memory before** (C's `malloc` does *not* zero memory). If
+  those stale bytes were someone's secret and you send them out, that's a leak;
+  if they were a stale pointer or size, that's a crash or corruption.
+- **NULL / wild pointers** — using a pointer that points at box 0 (NULL) or at a
+  garbage address. Usually a crash (denial of service), occasionally worse.
+- **Memory leaks** — not corruption, but forgetting to `free` lockers until the
+  storeroom fills up and the program dies. A slow denial of service.
+- **Stack exhaustion** — calling functions so deeply (or allocating giant locals)
+  that the stack runs out of room and smashes into something else.
+
+Each section below gives the plain idea, several code examples, the real-world
+impact (with the famous CVE where relevant), and the fix. The recurring cures are
+boringly consistent: **validate indices and lengths before using them, and
+initialize memory before you read it.**
 
 ---
 

@@ -2,10 +2,53 @@
 
 > The original, canonical memory-corruption bug ("Smashing the Stack for Fun and
 > Profit", Aleph One, 1996). Master this and every other bug is a variation.
+> Needs Chapter 1 (the stack frame, `call`/`ret`). We start gentle, then go all
+> the way to real exploitation.
+
+---
+
+## 2.0 In plain words (start here)
+
+Picture a row of memory boxes from Chapter 1. A **buffer** is just a handful of
+adjacent boxes a program set aside for some data — say 16 boxes for a 16-byte
+name. The boxes *right after* those 16 don't belong to the name; they hold other
+things the program needs, including (eventually) the **return address** — the
+"sticky note" that says where to go when the current function finishes (Chapter 1
+§1.6).
+
+Now imagine the program copies a name into those 16 boxes **without checking how
+long the name is**. If someone gives it a 40-character name, the program writes
+40 boxes' worth of data starting at box 0 — filling the 16 name boxes and then
+*spilling over* into the boxes after it. It's like pouring 40 cl of water into a
+16 cl glass: the extra 24 cl runs onto the table and into whatever is sitting
+next to the glass.
+
+That "whatever is next to it" includes the return-address sticky note. So the
+attacker, just by sending a long enough name with specific bytes at the end, can
+**overwrite the note** with an address of their choosing. When the function
+finishes and the CPU reads the note (the `ret` instruction from Chapter 1), it
+jumps to the attacker's address instead of back to the caller. The attacker now
+controls what code runs.
+
+That's the entire idea. The rest of this chapter makes it precise, shows it
+happening at the machine-code level, gives you twelve variations to recognize,
+and ends with how it's actually exploited on modern systems.
+
+Three terms you'll see throughout:
+- **buffer** — a fixed-size group of boxes for data (e.g. `char buf[16]`).
+- **overflow** — writing past the end of those boxes into neighbors.
+- **return address** — the saved "where to resume" note, sitting just above the
+  buffers in the stack frame; the prime overwrite target.
 
 ---
 
 ## 2.1 What it is
+
+A **buffer overflow** writes **more data into a buffer than it can hold**, so the
+write spills into *adjacent* memory. When the buffer is a **local variable on the
+stack**, adjacent memory includes the saved frame pointer and the **return
+address**. Overwrite the return address → when the function runs `ret`, the CPU
+jumps wherever you told it.
 
 A **buffer overflow** writes **more data into a buffer than it can hold**, so the
 write spills into *adjacent* memory. When the buffer is a **local variable on the
@@ -395,6 +438,66 @@ Then layer defenses (Chapter 13): **stack canary** (`-fstack-protector-strong`),
 **NX**, **ASLR+PIE**, **FORTIFY** (`-D_FORTIFY_SOURCE=2 -O2`). Fuzz with **ASan**
 (`-fsanitize=address`) — it catches every case above with a precise report. Prefer
 **Rust** for new security-critical code.
+
+---
+
+## 2.18 Advanced: what a real stack exploit looks like *today*
+
+The simple "overwrite the return address with my shellcode's location" worked in
+1996. On a modern Linux box, three defenses (all in Chapter 13) stand in the way,
+and a real exploit is a sequence of steps to get around each one. Understanding
+*why* the simple attack no longer works is what separates beginner from advanced.
+
+**Obstacle 1 — the stack isn't executable (NX).** You can still overwrite the
+return address, but you can no longer point it at bytes *you* put on the stack,
+because the CPU refuses to execute stack memory. **Workaround:** don't inject
+code — *reuse* code that is already executable. Point the return address at an
+existing function (e.g. libc's `system`) or chain together tiny existing snippets
+("gadgets"). This is **ret2libc / ROP**, Chapter 12. The overflow from this
+chapter is still the way in; only the *payload after the offset* changes.
+
+**Obstacle 2 — a stack canary.** The compiler places a secret random value (the
+"canary") between the buffers and the return address, and checks it is unchanged
+right before `ret`. A linear overflow that reaches the return address must first
+overwrite the canary, so the check fails and the program aborts. **Workaround:**
+first *leak* the canary value (e.g. via a format-string bug, Chapter 7, or an
+out-of-bounds read, Chapter 9), then include the correct canary in your payload
+so the check still passes. Or target something the function uses *before* it
+returns (a local function pointer), so `ret` is never reached. This is why real
+write-ups are usually "bug A leaks a secret, bug B overflows" — the **info leak**
+is half the work.
+
+**Obstacle 3 — ASLR/PIE.** Addresses (libc, the stack, even the program's own
+code) are randomized each run, so you can't hard-code where `system` or your
+gadgets live. **Workaround:** leak *one* address from a region, then compute the
+rest by adding/subtracting known fixed offsets within that region. A single
+leaked libc pointer reveals libc's whole layout.
+
+So a modern stack exploit is typically: **(1)** use the overflow (or a second
+bug) to *leak* a canary and a libc address; **(2)** use the overflow again to
+place a **ROP chain** that calls `system("/bin/sh")` with the now-known
+addresses, including the correct canary. The hands-on versions are in Chapter 12
+(ROP), Chapter 13 (each defense), and the login-server walkthrough
+([`walkthroughs/01-login-server`](walkthroughs/01-login-server/WALKTHROUGH.md)),
+which derives the offset from the disassembly and drives it to a shell.
+
+**Advanced nuances worth knowing now:**
+- **16-byte stack alignment.** x86-64 libc functions use SSE instructions
+  (`movaps`) that fault unless `rsp` is 16-byte aligned at the call. ret2libc
+  payloads often need an extra bare `ret` gadget to fix alignment — a real
+  constraint, not a mystery (Chapter 2 §2.6 shows it).
+- **Saved-RBP (frame pointer) overwrite.** You don't always need the full return
+  address. Overwriting just the low byte(s) of the saved `rbp` (an off-by-one,
+  §2.7) can pivot the caller's stack on its own `leave; ret` — a subtler but real
+  primitive.
+- **Partial overwrites.** Under ASLR the low 12 bits of an address are *not*
+  randomized (they're the page offset), so overwriting only the low byte or two
+  of a saved pointer can redirect execution within a known page without needing a
+  full leak.
+- **Not all control is the return address.** A local function pointer, a C++
+  object's vtable pointer on the stack, or a `longjmp` buffer are all control
+  data an overflow can hit *before* `ret` — defeating canaries, which only guard
+  the return path.
 
 ---
 

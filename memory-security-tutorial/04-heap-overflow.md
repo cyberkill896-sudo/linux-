@@ -5,6 +5,37 @@
 
 ---
 
+## 4.0 In plain words (start here)
+
+A heap overflow is the exact same mistake as Chapter 2 — writing more into a
+buffer than it can hold — except the buffer lives in a **heap locker**
+(Chapter 3) instead of on the stack. So what gets trampled is different:
+
+- On the **stack**, overflowing hit the saved return address (a clear "win" for
+  an attacker).
+- On the **heap**, there is no return address next door. Instead you hit either
+  **(a)** the *next object* sitting just above you in the storeroom, or **(b)**
+  the clerk's *metadata tag* for the next locker.
+
+Case (a) is the most common and the easiest to reason about: if the object next
+to yours happens to hold a **function pointer**, a **length**, or an
+**"is_admin" flag**, your overflow rewrites it, and now the program calls your
+address / copies your size / treats you as admin. Case (b) corrupts the clerk's
+bookkeeping, which is more powerful but needs the allocator knowledge from
+Chapter 3 (and the techniques in Chapter 5).
+
+One extra wrinkle vs. the stack: heap lockers aren't laid out in a fixed order
+you can assume. So real heap exploitation includes **"grooming"** — making a
+careful sequence of `malloc`/`free` calls so the object you want to corrupt ends
+up right after the buffer you can overflow. The test cases below focus on the
+corruption itself; grooming is covered in Chapters 5–6.
+
+Keep Chapter 3's picture in mind: your data, then (just above) the next chunk's
+**metadata tag**, then the next object. Overflow walks through them in that
+order.
+
+---
+
 ## 4.1 Why the heap version is different
 
 - No single "return address" sits next to a heap buffer. Instead you corrupt:

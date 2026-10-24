@@ -9,6 +9,52 @@ differ in detail but share the ideas.
 
 ---
 
+## 3.0 In plain words (start here)
+
+In Chapter 1 the **stack** was automatic: locals appear when a function is
+entered and vanish when it returns, and the CPU manages it with `rsp`. But often
+a program doesn't know *at compile time* how much memory it needs, or needs some
+memory to outlive the function that created it (e.g. "load a file of unknown
+size and keep it around"). For that it uses the **heap**.
+
+Think of the heap as a big storeroom, and `malloc`/`free` as the **clerk** who
+hands out lockers:
+
+- `p = malloc(100)` = "clerk, give me a locker big enough for 100 bytes." The
+  clerk finds space, and hands you a key (`p`, a pointer to your locker).
+- `free(p)` = "I'm done with this locker, take it back." The clerk marks it
+  available so it can be handed to the next request.
+
+Here's the catch that makes the heap a security topic: to track which lockers are
+free, how big each is, and which free locker comes next, the clerk scribbles
+**bookkeeping notes on little tags attached to each locker — and those tags sit
+right next to your data**. This bookkeeping is called **chunk metadata**.
+
+Two consequences follow, and they power all of Chapters 4–6:
+
+1. If you **write past the end of your locker**, you scribble over the *next*
+   locker's tag (or its contents). Now the clerk's notes are wrong — and an
+   attacker chose what they say. (Heap overflow, Chapter 4.)
+2. The clerk's behavior is **predictable**: hand back a locker and the very next
+   same-size request usually gets that exact locker again. That predictability is
+   what lets an attacker arrange for memory to be reused in a way they control
+   (use-after-free and the techniques in Chapters 5–6).
+
+This chapter is the "how the clerk actually works" reference. It's the most
+mechanical chapter in the course; you don't need to memorize every bin, but you
+*do* need the chunk picture (§3.2) and the idea that **freed memory gets reused
+predictably** (§3.3). Skim the rest and come back when a later chapter needs it.
+
+Glossary for this chapter:
+- **chunk** — one locker: your data plus its metadata tag.
+- **metadata** — the clerk's notes stored next to your data (size, flags, and,
+  once freed, links to other free chunks).
+- **bin / free list** — the clerk's lists of available lockers, grouped by size.
+- **tcache** — a small, fast per-thread list of recently freed lockers, checked
+  first (modern glibc). This is the one beginners meet most.
+
+---
+
 ## 3.1 malloc/free are library code, not CPU instructions
 
 ```c

@@ -6,6 +6,54 @@
 
 ---
 
+## 7.0 In plain words (start here)
+
+When you call `printf("Hello %s, you are %d", name, age)`, the first argument is
+a **format string**: a template with `%`-placeholders. `printf` reads it
+left-to-right, and every time it meets a `%`-placeholder it grabs "the next
+argument" and formats it. `%s` means "treat the next argument as text," `%d`
+means "as a number," and so on.
+
+Crucially, **`printf` figures out how many arguments to use by counting the
+placeholders in the format string** — it has no other way to know. It just trusts
+the template.
+
+Now the bug. Suppose a lazy programmer writes:
+
+```c
+printf(name);          // instead of printf("%s", name)
+```
+
+If `name` is `"Alice"`, this prints `Alice` — looks fine. But `name` comes from
+the user, and if the user types `"%s%s%s%x"`, then *their text becomes the
+template*. `printf` now dutifully looks for four arguments that the programmer
+never passed — so it reads whatever happens to be lying around in registers and
+on the stack, and prints that. The user just made `printf` **leak memory**.
+
+It gets worse. One placeholder, **`%n`**, doesn't print anything — it *writes* the
+number of characters printed so far into a memory address taken from "the next
+argument." With the right crafted format string, an attacker turns that into
+"write a value I choose to an address I choose" — an **arbitrary write**, which
+leads to full code execution.
+
+So a single misuse — passing user data where a literal template belongs — hands
+an attacker **both** a memory read (via `%x`/`%p`/`%s`) and a memory write (via
+`%n`). That's why it's one of the most powerful bug classes when it appears.
+
+The fix is almost insultingly simple and worth stating up front: **always make
+the format string a literal you wrote**, and pass user data as an argument:
+`printf("%s", name)`. The compiler flag `-Wformat-security` will even refuse to
+build the dangerous form. The rest of the chapter shows exactly how the read and
+write primitives work so you can recognize and exploit (and fix) them.
+
+Quick placeholder cheat (full detail in §7.3):
+- `%p` / `%x` → print a value off the stack (a **leak**).
+- `%s` → treat the next value as a pointer and print the text there (**read**).
+- `%n` → **write** the count-so-far to an address (**write**).
+- `%7$p` → "the 7th argument, directly" (positional — pick your target).
+
+---
+
 ## 7.1 What it is
 
 `printf`-family functions take a **format string** that tells them how many
