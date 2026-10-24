@@ -48,6 +48,22 @@ adjacent memory: other users' data, pointers (→ defeat ASLR), secret keys. It
 happens because an **index or length isn't validated against the real buffer
 size**, and C's `arr[i]` is just "base + i×size, dereference" with no check.
 
+**Why a "read-only" bug is often as serious as a write.** Beginners
+underestimate leaks because nothing is corrupted. But two things make OOB reads
+devastating:
+1. **They're silent and repeatable.** No crash, no log — so an attacker can
+   repeat the leak thousands of times and reassemble large regions of memory
+   (this is exactly how Heartbleed harvested keys). A write bug usually crashes
+   eventually; a read bug just quietly hands over data.
+2. **Leaked pointers defeat ASLR — the gateway to *every* write exploit.** Recall
+   ASLR (Chapter 13) randomizes addresses so an attacker doesn't know where
+   anything is. The moment an OOB read leaks *one* pointer (a return address, a
+   libc pointer, a heap pointer), the attacker subtracts a known offset and
+   recovers that whole region's base — and now a *separate* write bug becomes
+   usable. That's why real exploits are "leak **then** corrupt": the read bug in
+   this section is frequently the enabling half of a control-flow hijack
+   elsewhere. A leak is rarely "just" a leak.
+
 ### Test case 1 — attacker-controlled read length (the Heartbleed shape)
 ```c
 // o01_heartbleed.c
@@ -113,6 +129,35 @@ Reading a variable or buffer **before it's written**. Its contents are leftover
 bytes — stack garbage, or a **previous heap object's data** (possibly another
 user's secret). Crucially, **`malloc` does NOT zero memory** (only `calloc`
 does), so a fresh `malloc` can hand you a freed object's bytes.
+
+**The mental model: memory is never "blank," only "last used by someone."** When
+you declare a local or call `malloc`, you don't get fresh zeroed boxes — you get
+boxes that some *earlier* function call or allocation already wrote to, with
+their old contents intact. The compiler/allocator doesn't clear them because
+clearing costs cycles and C's philosophy is "don't pay for what you didn't ask
+for." So an uninitialized read returns **whatever the previous occupant left**:
+- a **local variable**'s bytes are whatever the last function whose frame
+  overlapped this one wrote (Chapter 1: frames reuse the same stack region);
+- a **`malloc`'d buffer**'s bytes are whatever the last object in that chunk
+  contained before it was freed.
+
+**Two distinct dangers, often confused:**
+1. **Information leak (outbound).** If the stale bytes were a secret or a pointer
+   and you send/return the buffer without fully overwriting it, you leak them —
+   the same ASLR-defeating leak as an OOB read. Struct **padding** (§ test case 3)
+   is the sneakiest version: you set every field but the invisible alignment
+   bytes between fields stay stale, and `send(fd, &s, sizeof s)` ships them.
+2. **Undefined behavior (inbound).** If the stale bytes are used as a **size** or
+   a **pointer** — an uninitialized `len` passed to `memcpy`, an uninitialized
+   `ptr` dereferenced — you get a wild allocation, a wild read/write, or a crash,
+   and the behavior changes run to run (because the leftover bytes change). This
+   is also a *reliability* nightmare: "works on my machine, crashes in
+   production" is often an uninitialized read whose leftover bytes happened to be
+   benign during testing.
+
+The kernel version (`copy_to_user` of a struct with uninitialized padding) is one
+of the most common Linux infoleaks and directly defeats KASLR — see Chapter 14
+and the Dirty Pipe lab (a stale *flag*, the control-value cousin of this bug).
 
 ### Test case 1 — uninitialized local used as size/pointer
 ```c
