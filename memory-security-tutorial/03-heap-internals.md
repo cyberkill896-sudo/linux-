@@ -133,6 +133,28 @@ Key consequences to internalize:
 - fastbins never consolidate immediately, so a **fastbin dup** (freeing the same
   chunk twice) puts it on the list twice.
 
+**Why "determinism" is the whole game — the deep point.** An exploit needs to
+*predict and control* which memory `malloc` returns. If allocation were random,
+use-after-free and the techniques in Chapters 5–6 wouldn't work. But the bins
+make it predictable in two ways the attacker exploits:
+
+1. **Reuse is positional and immediate (LIFO).** `free(x); ... y = malloc(same
+   size)` returns `x`'s *exact* address, right now, no randomness. So an attacker
+   can free a victim object and *immediately* reclaim its slot with an object
+   they control (the "reclaim" of Chapter 6), knowing precisely where it lands.
+2. **Same size ⇒ same bin ⇒ same slot.** Objects are binned by size, so to reuse
+   a freed object's memory you allocate something of the **same size class**.
+   This is why real exploits talk about "a spray object of the right size" — they
+   pick an allocation whose size matches the victim's so it draws from the same
+   bin. (In the kernel, Chapter 14, this is choosing `msg_msg`/`sk_buff` of the
+   victim's size.)
+
+So the allocator's performance optimizations — caching freed chunks and handing
+the hottest one back first — are *exactly* what give an attacker a reliable,
+predictable building block. Every heap technique in Chapter 5 and every UAF in
+Chapter 6 rests on this determinism; the hardening in later glibc (randomized
+bins, Safe-Linking) is partly an attempt to claw some unpredictability back.
+
 ---
 
 ## 3.4 Consolidation (coalescing) and `top`

@@ -80,6 +80,35 @@ glibc ≥ 2.26. A freed tcache chunk stores a **`next`** pointer (singly-linked
 LIFO). If a bug lets you overwrite `next`, you choose where the **second** malloc
 of that size returns.
 
+**First, understand what the tcache free list *is*.** When you `free` a small
+chunk, glibc doesn't scrub it — it repurposes the first 8 bytes of your old data
+as a **`next` pointer** linking to the previous freed chunk of that size, and
+stores the list head in a per-thread array. Allocation is just "unlink the head":
+`malloc` returns the head chunk and sets the head to `head->next`. It's a plain
+singly-linked stack (LIFO), and — crucially — **the links live inside the freed
+chunks themselves**, i.e. in memory your bug may still be able to write.
+
+**The poison, step by step** (map each line to the list state):
+
+```
+ free(a):        tcache[0x40] head -> a ,  a.next = NULL
+ *(size_t*)a = &target:                     a.next = &target   (the LIE)
+                 tcache[0x40] head -> a -> target   (allocator now believes
+                                                     `target` is a free chunk!)
+ x = malloc(0x30): returns a   ; head -> target
+ y = malloc(0x30): returns &target        <-- malloc handed us a pointer we chose
+```
+
+The allocator never checks that `&target` is a real chunk it ever gave out — it
+just trusts the `next` link it finds in a freed chunk. By overwriting that link
+(via a use-after-free write or a heap overflow into the freed chunk), you make
+the **second** `malloc` of that size return **any address you want**. Point it at
+a GOT entry, a saved return address, `__free_hook` (old glibc), or a function
+pointer, and the following write through `y` is your **write-what-where**.
+
+That is the whole primitive: *the free list is attacker-writable, so you forge a
+fake "next free chunk" and malloc hands it to you.*
+
 ```c
 // tcache_poison.c  (educational; glibc with no/weak safe-linking)
 #include <stdio.h>
