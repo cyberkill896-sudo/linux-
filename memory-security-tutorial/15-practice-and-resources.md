@@ -142,4 +142,9 @@ bodies are buried.
 - **Ch.15** tooling, fuzzing, legal practice, defensive mindset.
 
 Build the labs, break your own code, then fix it. That loop is the whole skill.
-See **[`CHEATSHEET.md`](CHEATSHEET.md)** for the one-page field guide.
+
+**Further chapters:** **[Chapter 16 — Shellcode »](16-shellcode.md)** (what runs
+after you get control) and **[Chapter 17 — Real-world CVE case studies »](17-case-studies.md)**
+(every famous bug mapped back to these classes). Then the hands-on
+**[`src/`](src/README.md)** code, **[`EXERCISES.md`](EXERCISES.md)**, and the
+**[`CHEATSHEET.md`](CHEATSHEET.md)**.

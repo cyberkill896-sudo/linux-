@@ -35,9 +35,21 @@ chapter has **many annotated test cases** and ends with the safe fix.
 | 13 | [Mitigations & how they're bypassed](13-mitigations.md) | Canary, NX, ASLR/PIE, RELRO, FORTIFY, CFI/CET/PAC, hardened allocators — the arms race. |
 | 14 | [Kernel memory vulnerabilities](14-kernel-memory.md) | user/kernel boundary, double-fetch, kernel UAF/refcount, slab spray, SMEP/SMAP/KPTI/KASAN. |
 | 15 | [Practice, tooling & resources](15-practice-and-resources.md) | Lab setup, sanitizers, fuzzing, debuggers, CTF sites, books, a study plan. |
+| 16 | [Shellcode & ret2shellcode](16-shellcode.md) | what shellcode is, `execve("/bin/sh")` byte-by-byte, NOP sleds, why NX killed it, ret2mprotect, encoders/egg-hunters. |
+| 17 | [Real-world CVE case studies](17-case-studies.md) | Heartbleed, Morris worm, Dirty COW, Dirty Pipe, a browser UAF, Stagefright, sudo Baron Samedit — each dissected. |
 
-Companion: **[`CHEATSHEET.md`](CHEATSHEET.md)** — a one-page field guide to every
-bug class, its tell, and its fix.
+### Also in this course
+
+- **[`src/`](src/README.md)** — **runnable, heavily-commented** `.c`/`.cpp`
+  programs for the test cases, a `Makefile` (insecure `make` + hardened
+  `make safe` + `make asan/tsan/msan`), and pwntools exploit scripts in
+  `src/exploits/`. Read the code — the comments explain each bug line by line.
+- **[`EXERCISES.md`](EXERCISES.md)** — 55 practice questions and labs
+  (⭐ beginner → ⭐⭐⭐ advanced) covering every chapter, with a capstone.
+- **[`SOLUTIONS.md`](SOLUTIONS.md)** — worked answers and walkthroughs. Try the
+  exercises first.
+- **[`CHEATSHEET.md`](CHEATSHEET.md)** — one-page field guide to every bug class,
+  its tell, and its fix.
 
 ---
 
