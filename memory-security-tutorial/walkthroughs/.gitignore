@@ -1,0 +1,12 @@
+# compiled walkthrough binaries and scratch artifacts
+01-login-server/server
+01-login-server/server_win
+01-login-server/server_safe
+01-login-server/server_asan
+02-note-manager/notes
+02-note-manager/notes_safe
+02-note-manager/notes_asan
+*.bin
+pat.txt
+core
+core.*

@@ -40,9 +40,17 @@ chapter has **many annotated test cases** and ends with the safe fix.
 
 ### Also in this course
 
+- **[`walkthroughs/`](walkthroughs/README.md)** — **full, realistic programs**
+  (a length-prefixed protocol server; a menu-driven note manager with
+  callbacks) with the bug embedded in context. Each `WALKTHROUGH.md` maps
+  **every line to the exact bytes it touches** — stack frames with real `rbp`
+  offsets, heap chunks with real addresses — then reproduces, exploits to a
+  shell, and fixes it. Every example is verified to build, exploit, be caught by
+  ASan, and be fixed by its `-DSAFE` build. **Start here if you want depth on
+  real code.**
 - **[`src/`](src/README.md)** — **runnable, heavily-commented** `.c`/`.cpp`
-  programs for the test cases, a `Makefile` (insecure `make` + hardened
-  `make safe` + `make asan/tsan/msan`), and pwntools exploit scripts in
+  programs for the individual test cases, a `Makefile` (insecure `make` +
+  hardened `make safe` + `make asan/tsan/msan`), and pwntools exploit scripts in
   `src/exploits/`. Read the code — the comments explain each bug line by line.
 - **[`EXERCISES.md`](EXERCISES.md)** — 55 practice questions and labs
   (⭐ beginner → ⭐⭐⭐ advanced) covering every chapter, with a capstone.
