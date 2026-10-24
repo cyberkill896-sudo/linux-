@@ -7,6 +7,45 @@
 
 ---
 
+## 13.0 In plain words (start here)
+
+The earlier chapters make exploitation sound easy. On a 1996 system it *was*.
+Since then, compilers and operating systems have added layers of defense, and
+each one took away a cheap trick. This chapter explains each defense in terms of
+*which attack step it blocks* and *how attackers adapted* — because you can't
+harden software well without knowing what each flag actually buys.
+
+It helps to see exploitation as a short pipeline, and each defense as a wall
+across one stage:
+
+1. **find a bug** → a buffer overflow, UAF, etc. (nothing here prevents the bug
+   itself — that's what safe coding and sanitizers are for);
+2. **get a primitive** → control the return address, or get a write-what-where;
+3. **know where to aim** → the addresses of your target and your gadgets;
+4. **run code** → shellcode, or a ROP chain.
+
+The big four defenses each block one stage:
+
+- **Stack canary** blocks step 2 for stack overflows: a secret value sits between
+  your buffer and the return address, and is checked before `ret`; a linear
+  overflow trips it and the program aborts.
+- **NX (No-eXecute)** blocks step 4's easy path: the stack/heap can't be
+  executed, so injected shellcode won't run (forcing the ROP of Chapter 12).
+- **ASLR + PIE** blocks step 3: addresses are randomized each run, so you can't
+  hard-code them.
+- **RELRO** removes a popular *target* for step 2 (the GOT, a table of function
+  pointers), by making it read-only.
+
+The theme of the chapter: **no single defense is complete, and attackers chain
+bypasses.** A memory leak (Chapter 7/9) defeats ASLR and canaries; ROP defeats
+NX; "data-only" attacks sidestep the newest control-flow defenses. That's exactly
+why real modern exploits are multi-stage, and why the only thing that *ends* the
+arms race is removing the bug (safe APIs, sanitizers, fuzzing, memory-safe
+languages). The table in §13.9 is a build recipe you can actually apply to your
+own code.
+
+---
+
 ## 13.1 The exploitation pipeline (so defenses make sense)
 
 A full memory-corruption exploit usually needs, in order:

@@ -11,6 +11,51 @@ each against specific glibc versions with full commentary.
 
 ---
 
+## 5.0 In plain words (start here)
+
+Chapter 4 showed a heap overflow corrupting a neighbor. This chapter answers the
+next question: *once I can corrupt the clerk's bookkeeping (Chapter 3), how do I
+turn that into real power?*
+
+The goal of every technique here is to get one of two "superpowers," called
+**primitives**:
+
+- **arbitrary write** ("write-what-where") — make the program write a value *you
+  choose* to an address *you choose*; or
+- **arbitrary allocation** — trick `malloc` into handing you a locker at an
+  address *you choose*, so you can then read/write there.
+
+Either one is game over, because you aim it at something sensitive (a saved
+return address, a function pointer the program will call, etc.) and overwrite it
+with your target.
+
+The common recipe is always the same four beats:
+1. a **bug** (overflow / use-after-free / double-free) lets you corrupt some of
+   the clerk's metadata — usually a chunk's size, or a **free-list link** (the
+   "which free locker comes next" pointer);
+2. you write a **lie** into that metadata;
+3. the clerk, believing the lie, later hands you a locker where you want, or
+   performs a write you control;
+4. you aim that at a **target** and trigger it.
+
+The named techniques (**tcache poisoning, fastbin dup, unlink, the "House of…"
+family**) are just different *specific lies* for different allocator versions.
+Two honest cautions for a beginner:
+
+- These are **version-specific**. glibc keeps adding checks (Safe-Linking, tcache
+  keys, size sanity checks), so a technique that worked on one glibc fails on the
+  next. The *idea* (abuse an allocator invariant) is the durable lesson; the
+  exact bytes are not.
+- Modern techniques almost always need an **information leak first** (Chapter 7
+  or 9) to learn a heap or libc address, because the newer checks compare against
+  real addresses.
+
+If you're new, read §5.1 (the mental model) and §5.2 (tcache poisoning — the one
+beginners meet in CTFs), run `src/16_tcache_poison.c`, and treat the "House of…"
+catalog as "know the name and the idea" until you need the depth.
+
+---
+
 ## 5.1 The mental model
 
 Every technique has the same shape:

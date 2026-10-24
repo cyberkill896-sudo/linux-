@@ -8,6 +8,44 @@
 
 ---
 
+## 11.0 In plain words (start here)
+
+So far every bug lived in a single stream of instructions. Modern programs run
+**several at once** — multiple threads, or the kernel handling two of your
+requests simultaneously. A **race condition** is a bug that only appears for
+certain *timings* of those parallel streams.
+
+The classic shape is **TOCTOU** — "Time Of Check To Time Of Use." A program
+*checks* something ("is this pointer valid?", "do I have permission?") and then,
+a few instructions later, *uses* it. If another thread changes the thing **in the
+gap between the check and the use**, the check was true but the use is now wrong.
+
+A kitchen analogy: you look in the fridge and see milk (the check), then turn to
+get a glass; meanwhile your roommate takes the milk; you reach back in and
+pour... nothing (the use). Nobody did anything individually wrong — the bug is in
+the *interleaving*.
+
+In memory terms this produces the same corruptions as earlier chapters, but
+reached through timing:
+- one thread **frees** an object while another is still **using** it → a
+  use-after-free (Chapter 6) that no single-threaded path has;
+- two threads both do `count--` on a shared counter and one update is lost →
+  a reference count that hits zero too early → another use-after-free or
+  double-free;
+- the kernel reads a size from your memory, checks it, then reads it **again** to
+  use it, and you changed it in between (a "double-fetch") → an overflow.
+
+What makes races dangerous is exactly what makes them hard to test: they're
+**nondeterministic**. The code can pass a million test runs and then fail — or be
+*forced* to fail by an attacker who widens the timing window on purpose (Dirty
+COW did this to get root). The fixes are about removing the gap: **lock** the
+check-and-use together, **snapshot** an untrusted value once and only use the
+copy, or use **atomic** operations for shared counters.
+
+---
+
+---
+
 ## 11.1 Why races cause memory corruption
 
 A memory-safety invariant ("this pointer is valid", "this length ≤ this buffer")

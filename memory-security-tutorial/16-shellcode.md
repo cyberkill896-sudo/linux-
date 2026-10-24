@@ -10,6 +10,43 @@ Prereq: Chapters 1, 2, 12.
 
 ---
 
+## 16.0 In plain words (start here)
+
+The earlier chapters are about *getting control* — making the CPU jump to an
+address you choose. **Shellcode** is the answer to the next question: *now that
+the CPU is running my bytes, what should those bytes do?*
+
+Shellcode is just a small blob of **machine code** (raw CPU instructions, as
+bytes) that you supply, which performs some action the moment it runs — most
+famously **spawning a shell** (`/bin/sh`), which gives the attacker an interactive
+command line on the target. Hence the name.
+
+Why "small" and why does it look so fiddly? Because of where it has to live and
+how it gets there:
+
+- It often has to fit inside a **small buffer**, so it must be compact.
+- It usually must contain **no zero bytes** (`0x00`), because it's frequently
+  delivered through string functions like `strcpy` that stop at the first zero.
+  So shellcode authors use instruction tricks (like `xor rax, rax` to make a
+  register zero) that avoid zero bytes in the encoding.
+- It must be **position-independent**: it can't assume it was loaded at a
+  particular address, because it might be copied anywhere. So it computes
+  addresses relative to itself or builds strings on the stack.
+
+The big historical arc of this chapter: originally you'd inject shellcode into a
+buffer and jump to it. Then **NX** (Chapter 13) made data memory non-executable,
+so that stopped working — which is *why* Chapter 12's code-reuse (ROP) exists.
+Shellcode is still relevant, though: on systems/CTFs where NX is off, and as the
+*final stage* of a ROP chain that first turns execution back on (`ret2mprotect`).
+
+You will almost never hand-assemble shellcode in practice — the `pwntools`
+library generates correct, zero-free shellcode for any architecture with one
+line (`asm(shellcraft.sh())`). But this chapter shows the real bytes of an
+`execve("/bin/sh")` payload and explains each instruction, so the magic blob
+stops being a mystery.
+
+---
+
 ## 16.1 What shellcode is and why it's small
 
 Shellcode is **position-independent machine code**, usually written to:

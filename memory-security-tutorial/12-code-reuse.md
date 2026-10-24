@@ -11,6 +11,50 @@ when you can't run your own bytes.
 
 ---
 
+## 12.0 In plain words (start here)
+
+By Chapter 2 you can overwrite the return address, so you control where the CPU
+jumps. The obvious plan — "put my own machine code (shellcode) on the stack and
+jump to it" — **does not work** on modern systems, because **NX** (Chapter 13)
+marks the stack non-executable: the CPU refuses to run instructions from it.
+
+So attackers switched tactics: instead of bringing their own code, they **reuse
+code that is already in the program and already allowed to execute** — chiefly
+the C library (**libc**), which is loaded into every process and contains handy
+functions like `system()` (which runs a shell command).
+
+Two levels of this:
+
+- **ret2libc** — point the return address straight at an existing function such
+  as `system`, having arranged its argument so it runs `system("/bin/sh")`. No
+  new code at all; you just "return into libc."
+- **ROP (Return-Oriented Programming)** — when no single function does what you
+  want, you stitch together dozens of *tiny* existing snippets. Each snippet is a
+  couple of instructions that ends in `ret` — called a **gadget**. Here's the key
+  trick: because `ret` jumps to whatever address is on top of the stack, if you
+  fill the stack with a *list of gadget addresses*, each gadget runs and its
+  final `ret` automatically launches the next one. You've turned "a stack full of
+  addresses" into "a little program" built entirely from fragments of the
+  victim's own code.
+
+An analogy: you can't write your own ransom note (NX), so you cut individual
+words out of a newspaper the victim already owns and paste them into the sentence
+you want. Each word is a gadget; the pasted-together sentence is the ROP chain.
+
+Two realities make this harder (and explain why real exploits have multiple
+stages):
+- Under **ASLR** (Chapter 13) you don't know *where* libc's functions/gadgets
+  are each run, so you first need an **information leak** to learn one address and
+  compute the rest.
+- The calling convention matters: to call `system("/bin/sh")` on 64-bit Linux the
+  string's address must be in the `rdi` register (Chapter 1 §1.7), so you need a
+  gadget like `pop rdi ; ret` to load it.
+
+The rest of this chapter builds these step by step at the assembly level. It's
+conceptual/CTF education — the mechanics, not a targeted weapon.
+
+---
+
 ## 12.1 The core idea
 
 The stack, after an overflow, is a **list of 8-byte values**. `ret` pops one into

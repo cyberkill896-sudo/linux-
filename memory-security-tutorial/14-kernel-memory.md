@@ -7,6 +7,46 @@
 
 ---
 
+## 14.0 In plain words (start here)
+
+Everything so far attacked a single *program*. The **kernel** is the master
+program that runs the whole computer: it owns all memory, all hardware, and
+decides what every other program is allowed to do. It runs in a privileged CPU
+mode (**ring 0**). So a memory bug in the kernel isn't "take over one app" — it's
+"take over the entire machine," turning an ordinary unprivileged user into
+**root**. That's called **local privilege escalation (LPE)**, and it's why
+kernel bugs are so valuable.
+
+The bug *classes* are the same ones you already know — overflow, use-after-free,
+integer overflow, race — but three things make the kernel special:
+
+1. **The attack surface is the boundary between your program and the kernel.**
+   Every time a program asks the kernel to do something (a *syscall*, an
+   `ioctl`, a write to `/proc`, a network packet, a mounted filesystem image),
+   it hands the kernel data. If the kernel mishandles that data, that's the bug.
+   This creates kernel-only bug shapes — like trusting a length or a pointer that
+   came from user space.
+2. **The kernel must never trust user-supplied pointers or sizes**, and it uses
+   special functions (`copy_from_user`, `copy_to_user`) to move data across the
+   boundary safely. Forgetting a check there, or reading a user value *twice*
+   (a "double-fetch" race), is a classic kernel bug.
+3. **Leaking kernel memory to a user** is uniquely bad: it reveals kernel
+   addresses that defeat KASLR (the kernel's ASLR), enabling the next step of an
+   exploit. A struct with uninitialized padding bytes copied out to userspace is
+   a real, common leak.
+
+The dominant modern kernel bug is the **use-after-free in the slab allocator**
+(the kernel's version of the heap clerk from Chapter 3), very often caused by a
+**reference-counting** mistake, then exploited by "spraying" look-alike objects
+to reclaim the freed slot — the same reclaim idea as Chapter 6, at kernel scale.
+
+This chapter is conceptual (you don't write a kernel exploit here). The goal is
+to recognize these shapes and know the defenses (SMEP/SMAP/KPTI, `refcount_t`,
+slab hardening, KASAN). **Only ever experiment in a disposable virtual machine** —
+a kernel bug can corrupt or crash the whole system.
+
+---
+
 ## 14.1 Why the kernel is different
 
 - **Privilege:** kernel code runs in **ring 0** with full access to all memory

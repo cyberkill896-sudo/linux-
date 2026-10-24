@@ -6,6 +6,40 @@
 
 ---
 
+## 10.0 In plain words (start here)
+
+C++ lets you write `shape->draw()` and have the *right* `draw` run depending on
+whether `shape` is really a Circle or a Square. That magic is called **virtual
+dispatch**, and here's how it works under the hood (it matters for security):
+
+Every object of such a class secretly starts with a hidden pointer called the
+**vptr**. It points to a little table of function addresses (the **vtable**) —
+one entry per virtual method. So `shape->draw()` compiles to: "follow the
+object's vptr to its vtable, read the `draw` entry, call that address."
+
+Now the security problem, in one sentence: **the vptr is the first 8 bytes of the
+object and lives in writable memory**, while the table it points to is read-only.
+So if *any* bug lets an attacker overwrite those first 8 bytes — a heap overflow
+from the object below it (Chapter 4), or a use-after-free reclaim (Chapter 6) —
+they can make the vptr point at a **fake table they built**, and the next virtual
+call jumps to their address. This is **vtable hijacking**, and it's the C++
+version of the return-address overwrite.
+
+The other star of this chapter is **type confusion**: getting the program to
+treat an object of type A as if it were type B. Because the two types have
+different field layouts, a field that is a harmless integer in A might sit exactly
+where B expects a *function pointer* — so the attacker, by controlling that
+integer, controls a pointer the program will call. This is the #1 bug class in
+web browsers.
+
+The rest of this chapter also covers the lifetime traps C++ adds (use-after-move,
+`delete` vs `delete[]`, iterator invalidation, exception leaks). The good news is
+that C++ *also* gives you the best defenses — **RAII and smart pointers** make
+most manual-lifetime bugs impossible — so the fixes section is as important as
+the bugs.
+
+---
+
 ## 10.1 How virtual dispatch works (so vtable hijacking makes sense)
 
 A polymorphic C++ object begins with a hidden **vptr** — a pointer to its class's
