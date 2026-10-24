@@ -116,10 +116,35 @@ long handle_ioctl(struct req __user *u){
                                           // u->len to something huge -> overflow
 }
 ```
-The kernel reads the **same userspace field twice**; a second user thread flips it
-between the two reads, so the check and the use disagree. This is a real, recurring
-kernel bug pattern (Chapter 14). **Fix:** `copy_from_user` the whole request into
-kernel memory **once**, then validate and use only the kernel copy.
+**Why this is subtler than an ordinary TOCTOU.** The dangerous detail is that
+`u` is a pointer into **userspace memory** (`__user`), which the attacker's
+process *fully owns and can modify from another thread at any instant*. The
+kernel reads `u->len` **twice**: once to validate it (`u->len > MAX`) and once to
+use it (as the `copy_from_user` size). Those are two separate memory reads of the
+same attacker-controlled location. The attacker runs a second thread that sits in
+a tight loop flipping `u->len` between a small, valid value and a huge one:
+
+```
+ attacker thread:   while(1){ u->len = 8; u->len = 0xffffffff; }
+ kernel:            [reads u->len = 8 -> passes check]
+                    [attacker flips to 0xffffffff]
+                    [reads u->len = 0xffffffff -> copies 4 GB into an 8-byte alloc]
+```
+
+The attacker just has to win the race once (loop + retry), and the validated
+value is **not** the value used — a kernel heap overflow with attacker data. Note
+the allocation size and the copy size were read *independently*, so "I checked
+it" is simply false by the time the copy runs.
+
+**Why the fix works.** `copy_from_user(&kreq, u, sizeof kreq)` pulls the whole
+request into **kernel** memory *once*. Kernel memory can't be modified by the
+attacker's other thread, so after that single copy you have a stable snapshot:
+validate `kreq.len` and use `kreq.len`, and they're guaranteed identical because
+they're the same kernel variable. The rule generalizes beyond the kernel:
+**read an untrusted value exactly once into memory you control, then validate
+and use only that copy** — never re-read the attacker's storage. This is a
+real, recurring kernel pattern (Chapter 14); the kernel even has tooling to flag
+double-fetches.
 
 ---
 

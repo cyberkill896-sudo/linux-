@@ -115,11 +115,47 @@ void handle(Animal *a, bool isDog){
     }                                 // as a function pointer -> controlled call
 }
 ```
-**Type confusion** = treating memory of type A as type B. A `static_cast` does no
-runtime check, so a `Cat` reinterpreted as a `Dog` reads `lives` (attacker-
-settable) where `bark` should be → call through attacker data. This is the #1
-**browser JS-engine** bug class (an object confused for a differently-shaped one).
-**Fix:** `dynamic_cast` (returns null on mismatch), tagged types, `std::variant`.
+**Type confusion** = treating memory of type A as type B. Walk the memory to see
+why it's code execution:
+
+```
+ A real Cat object:              A Dog's expected layout:
+ +------------------+            +------------------+
+ | vptr (Cat vtable)|            | vptr (Dog vtable)|
+ +------------------+            +------------------+
+ | int lives = 9    |  <----->   | void(*bark)()    |   SAME offset!
+ +------------------+            +------------------+
+```
+
+`Cat` and `Dog` both derive from `Animal`, so both start with a vptr. But at the
+*next* offset, `Cat` stores an `int lives` and `Dog` stores a **function
+pointer `bark`**. When `handle` does `static_cast<Dog*>(a)` on something that is
+really a `Cat`, and then calls `d->bark()`, the program reads the 8 bytes at that
+offset — which are actually `Cat::lives` — and **calls them as a function
+address**. If the attacker can set `lives` (e.g. it's scriptable, as object
+fields are in a browser), they've turned "set an integer" into "call an arbitrary
+address."
+
+**Why `static_cast` is the villain and `dynamic_cast` the fix.** `static_cast`
+is a *compile-time* assertion — "trust me, this `Animal*` is a `Dog*`" — with
+**zero runtime check**. If you're wrong (or an attacker makes you wrong), you
+reinterpret the bytes with no complaint. `dynamic_cast<Dog*>(a)` instead checks
+the object's *actual* runtime type (via its vtable/RTTI) and returns `nullptr`
+if it isn't really a `Dog`, so the mistake becomes a null check instead of a
+controlled call.
+
+**Why it's the #1 browser bug class.** A JavaScript engine represents JS values
+as C++ objects of many shapes (number, object, array, typed-array…). If a bug
+lets the engine treat a value of one shape as another — often reached *via* a
+use-after-free that reclaims a freed object's slot with a differently-typed
+object (Chapter 6) — the attacker gets exactly this "field of type A read as a
+pointer of type B" primitive, then builds arbitrary read/write from it. Hundreds
+of V8/JSC/SpiderMonkey CVEs are this shape.
+
+**Fix:** `dynamic_cast` (checked), **tagged unions** / `std::variant` (the type
+tag travels with the value so you can't misread it), and `-fsanitize=cfi`
+(Clang), which adds a runtime check that an indirect call's target is a valid
+function of the expected type — turning the hijacked `bark()` into an abort.
 
 ---
 
