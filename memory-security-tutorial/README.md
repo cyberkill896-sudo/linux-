@@ -40,6 +40,12 @@ chapter has **many annotated test cases** and ends with the safe fix.
 
 ### Also in this course
 
+- **[`cve-labs/`](cve-labs/README.md)** — **faithful, runnable reproductions of
+  famous real CVEs** (Heartbleed, GHOST, sudo Baron Samedit, Stagefright, Dirty
+  Pipe), each with the **full vulnerable code and a deep explanation in one
+  place**: the real kernel/library code, our reproduction mapped to memory, how
+  to run it, why it mattered, and the one-line fix. All verified to build and
+  demonstrate the bug (leak / ASan report / logic flip).
 - **[`walkthroughs/`](walkthroughs/README.md)** — **full, realistic programs**
   (a length-prefixed protocol server; a menu-driven note manager with
   callbacks) with the bug embedded in context. Each `WALKTHROUGH.md` maps
