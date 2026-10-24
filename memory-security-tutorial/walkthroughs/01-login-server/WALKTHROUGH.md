@@ -160,6 +160,49 @@ $ python3 exploit.py crash | ./server_asan
 ASan reports the destination object (`name`, 32 bytes) and the overflowing
 `memcpy` — the exact line, no guesswork.
 
+### 5b. Reading the corruption in GDB (real captured output)
+
+Run the crashing input under GDB and look at the registers at the moment it
+faults. This is the actual output on the reference build (`crash` sends
+`name = b"A"*40 + b"B"*8 + b"C"*152`):
+
+```
+Program received signal SIGSEGV, Segmentation fault.
+0x00000000004014ad in handle_login (...) at server.c:123
+123 }                                         <-- the function's `ret`
+rip  0x4014ad   <handle_login+226>
+rsp  0x7fffffffc3f8
+rbp  0x4141414141414141                        <-- saved RBP = our "AAAA..."
+0x7fffffffc3f8: 0x4242424242424242  0x4343434343434343
+                ^ the 8 bytes `ret` is about to load into rip = our "BBBBBBBB"
+```
+
+Read what each line tells you — this is the whole chapter made concrete:
+
+- **`rbp = 0x4141414141414141`.** The overflow's first 8 bytes past `name[32]`
+  landed on the **saved RBP**, so it now holds eight `'A'`s (`0x41`). The function
+  already executed `leave` (which did `pop rbp` from the corrupted slot), which is
+  why `rbp` is now attacker-controlled garbage.
+- **Fault at `server.c:123`, the closing `}` = the `ret`.** Execution reached the
+  very last instruction, `ret`. `ret`'s job is "pop the top stack value into
+  `rip` and jump there."
+- **`[rsp] = 0x4242424242424242`.** The top of the stack — exactly what `ret` is
+  about to load — is our `"BBBBBBBB"` (the 8 bytes at offset 40). So `ret` will
+  set `rip = 0x4242424242424242`.
+- The SIGSEGV happens *as* `ret` tries to continue at `0x4242424242424242`, an
+  unmapped address. **That address is 100% attacker-chosen.** Replace those 8
+  `'B'`s with a real, mapped address (like `win`'s) and the program jumps there
+  instead of crashing — which is precisely what step 6 does.
+
+This is the payoff of Chapters 1–2: you can *see* that the return address is just
+8 bytes on the stack with nothing protecting it (no canary on this training
+build), and that `ret` loads whatever you put there into `rip`. The `0x41`s in
+`rbp` and the `0x42`s in the return slot are your input, byte for byte.
+
+> Try it yourself: `gdb -q --args ./server_win` then
+> `run < <(python3 exploit.py crash)`, and at the crash:
+> `info registers rip rsp rbp` and `x/4gx $rsp`.
+
 ---
 
 ## 6. Weaponize — ret2win (control-flow hijack)
