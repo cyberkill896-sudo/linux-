@@ -128,10 +128,33 @@ Instead of many `%p`, jump straight to argument N:
 echo '%6$p' | ./f01        # print the 6th argument directly
 echo '%7$s' | ./f01        # dereference the 7th argument as a char*  (arbitrary read)
 ```
-`%6$p` = "give me parameter #6." This is how you leak a **specific** value — e.g.
-a saved return address (→ defeat PIE), the stack canary, or a libc pointer (→
-defeat ASLR). Finding "which `$N` is my buffer" turns the read into a controlled
-read.
+`%6$p` = "give me parameter #6." The `N$` syntax is **positional**: it jumps
+directly to the Nth variadic argument instead of consuming them one by one. This
+matters because you usually want one *specific* value — a saved return address (→
+defeat PIE), the stack canary, or a libc pointer (→ defeat ASLR) — and you don't
+want to count dozens of `%p`s to reach it.
+
+**How to find the index N for a value you care about — two sub-skills:**
+
+1. *Find where your own input lands.* Send a unique marker followed by many
+   positional reads and see which one echoes your marker:
+   ```bash
+   printf 'ABCD %1$p %2$p %3$p %4$p %5$p %6$p %7$p %8$p' | ./f01
+   ```
+   When one of them prints `0x44434241` (that's `"ABCD"` little-endian, Chapter 1
+   §1.8), that index is the start of *your buffer* on the stack. Knowing this
+   index is the key that unlocks the **write** primitive (test case 4): you place
+   a target *address* in your buffer, then use `%<that index>$n` to write through
+   it.
+2. *Identify a leaked value by its shape.* As you walk indices, recognize values
+   by their high bytes (next section): `0x7f...` is a libc/stack pointer,
+   `0x55.../0x56...` is a PIE code/data pointer, a word ending in `00` that
+   changes every run is likely the canary.
+
+So the workflow is: **leak to find your buffer's index and to grab the
+canary/libc/PIE pointers, then use those in the write stage.** Finding "which
+`$N` is my buffer" is the single most important measurement in format-string
+exploitation.
 
 ---
 
@@ -143,14 +166,36 @@ read.
 void vuln(void){ char buf[128]; fgets(buf,sizeof buf,stdin); printf(buf); }
 int main(void){ vuln(); vuln(); }   // loop so you can leak then exploit
 ```
-Walk the stack with `%N$lx` until you spot:
-- a value like `0x...00` ending in a zero byte that moves each run → **canary**;
-- a `0x7f...` pointer into libc → subtract a known offset → **libc base**
-  (defeats ASLR, Chapter 13);
-- a `0x55.../0x56...` pointer → **PIE base** of the program.
+**How to read the stack dump — identifying each kind of value.** When you print
+many stack words with `%N$lx`, you're looking at a snapshot of whatever happens
+to be in `vuln`'s frame and below: saved registers, leftover values, and
+pointers. You classify them by their top bytes and by how they change between
+runs:
+
+- **The stack canary** (Chapter 13): a 64-bit value whose **lowest byte is `00`**
+  (glibc deliberately makes the low byte a NUL to stop string-based leaks) and
+  whose other 7 bytes are random — and it is **different on every run**. If you
+  see `0x<random>...00`, that's almost certainly the canary. You need its value
+  to survive a stack overflow that crosses it, so you leak it first, then include
+  it unchanged in your overflow payload.
+- **A libc pointer**: starts with `0x7f` (on 64-bit Linux, shared libraries map
+  high). Any one libc address minus the *known fixed offset* of that symbol
+  within the specific libc build gives you **libc base** → every libc function
+  and ROP gadget address → ASLR defeated for libc (Chapter 13).
+- **A PIE pointer**: starts with `0x55` or `0x56` — a pointer into the program's
+  own randomized code/data. Subtract the symbol's known file offset to get the
+  **program base**, defeating PIE.
+- **A stack pointer**: also `0x7ff...`, pointing near other stack addresses —
+  useful if you need to know where your buffer lives (e.g. for a stack pivot).
+
+The `vuln(); vuln();` loop in the code exists so you can do this in two passes:
+**first** call leaks the canary/libc/PIE values; you compute the real addresses;
+**second** call sends the actual exploit using them. That two-stage "leak, then
+act" structure is exactly how real exploits defeat ASLR and canaries.
 
 Format strings are the classic **info-leak half** of an exploit precisely because
-they read arbitrary stack words with no crash.
+they read arbitrary stack words with **no crash** — you can probe as much as you
+like, which is a luxury most bugs don't give you.
 
 ---
 
