@@ -240,9 +240,51 @@ int main(void){
     else        puts("denied");
 }
 ```
-Lesson: **overflow corrupts neighbors.** Exact layout is compiler-dependent, but
-the principle — a flag/length/pointer next to the buffer gets clobbered — is
-universal and is the most common *real-world* consequence.
+**What happens, step by step.** `main` has two locals: `pass[16]` and `authed`.
+The compiler places them in `main`'s stack frame, typically adjacent, with
+`authed` just above `pass` (toward higher addresses). `authed` starts at 0, so
+the `if` would normally take the `else` branch — access denied. `gets(pass)`
+reads an entire line from the user with **no length limit** (that is the whole
+reason `gets` was removed from the C standard). If the user types 16 characters,
+`pass` is exactly full and `authed` is untouched. If the user types 17 or more
+**non-zero** characters, byte number 17 (and beyond) is written *past* the end of
+`pass`, into the bytes that store `authed`. Any non-zero byte landing there makes
+`authed` non-zero, so `if (authed)` is now true → access granted, with no
+password ever checked.
+
+**Why `volatile`.** Without it, an optimizing compiler might notice that nothing
+in the *source* ever assigns `authed` and "prove" it is always 0, deleting the
+check entirely. `volatile` forces the compiler to actually read `authed` from
+memory each time, so the demo behaves predictably. (In real code the flag is set
+by legitimate logic elsewhere; `volatile` here just stands in for "the compiler
+can't assume it stays 0.")
+
+**Why this matters more than it looks.** You did *not* need to control the return
+address, defeat a canary, or know any address. You flipped one integer next to a
+buffer. This "overwrite the neighbor" pattern is the **most common real-world
+consequence** of an overflow, because the neighbor is often exactly the kind of
+value that gates behavior: an `is_authenticated` flag, a length field used by a
+later copy, a privilege level, or a function pointer the code will call. Many
+shipped CVEs are "corrupt an adjacent field," not "full control-flow hijack."
+
+**Finding the exact offset on your build.** Field order and padding are
+compiler- and flag-dependent, so don't assume "17." Measure it in GDB:
+```gdb
+break <line of the if>
+run
+p &pass            # e.g. 0x7fffffffe230
+p &authed          # e.g. 0x7fffffffe240
+# distance = &authed - &pass; type that many bytes, then one more non-zero byte
+```
+If `authed` turns out to be *below* `pass` on your build, this particular
+overflow won't reach it (overflow only goes upward) — which is itself a useful
+lesson about how layout decides exploitability.
+
+**The fix.** Bound the read to the buffer and never let a security decision
+depend on a value sitting next to an unbounded buffer:
+```c
+fgets(pass, sizeof pass, stdin);   // reads at most 15 chars + NUL; never overruns
+```
 
 ---
 
@@ -267,9 +309,45 @@ e = ELF('./t03'); p = process('./t03')
 p.sendline(b'A'*40 + p64(e.sym['win']))  # 32 buf + 8 saved rbp, then win()
 p.interactive()
 ```
-On x86-64 you may need an extra `ret` gadget before `win` for 16-byte stack
-alignment (libc's `movaps` faults otherwise). `ROP(e)` in pwntools inserts it.
-This alignment requirement is itself a lesson in how strict the ABI is.
+**What this demonstrates.** This is the first *full control-flow hijack*. The
+program contains a function `win()` that spawns a shell but is **never called**
+on the normal path — `main` only calls `vuln`. If we can make the program run
+`win` anyway, we've proven we control execution. This "reach the hidden win
+function" exercise is the canonical first pwn challenge ("ret2win").
+
+**Walking the exploit.**
+1. `vuln` declares `buf[32]` and calls `gets(buf)` — the same unbounded-read bug.
+   Its stack frame is: `buf` (32 bytes), then the saved RBP (8 bytes), then the
+   return address (8 bytes) — exactly the Chapter 1 picture.
+2. To reach the return address we must fill `32 + 8 = 40` bytes, so the **offset**
+   is 40. (Always verify with a cyclic pattern — §2.4 — rather than trusting the
+   arithmetic; alignment padding can change it.)
+3. We find `win`'s address. Because the binary is built `-no-pie`, that address
+   is **fixed** every run, so we can hard-code it. `objdump -d t03 | grep
+   '<win>:'` prints it; pwntools reads it as `e.sym['win']`.
+4. The payload is `b'A'*40 + p64(win_addr)`: 40 filler bytes to reach the return
+   slot, then `win`'s address written over the return address. `p64` encodes it
+   as 8 little-endian bytes (Chapter 1 §1.8).
+5. When `vuln` finishes, `ret` pops our `win` address into `rip` and the program
+   "returns" into `win`, which runs `system("/bin/sh")` → a shell.
+
+**The alignment gotcha (important, real).** On x86-64, the ABI requires `rsp` to
+be 16-byte aligned when a `call` happens. libc functions such as `system` use SSE
+instructions like `movaps [rsp], xmm0` that **fault** if `rsp` is misaligned. Our
+single return-address overwrite can leave `rsp` 8 off, so `system` crashes inside
+libc instead of giving a shell. The fix is to jump first to a harmless `ret`
+gadget (any lone `ret` instruction in the binary): executing it pops 8 bytes,
+nudging `rsp` by 8 back into alignment, and its own `ret` then continues to
+`win`. So the robust payload is `b'A'*40 + p64(ret_gadget) + p64(win_addr)`.
+pwntools' `ROP(e)` inserts this automatically — but now you know *why* that extra
+gadget appears in write-ups. It's not magic; it's the ABI's alignment rule.
+
+**On a modern (hardened) build** `win` wouldn't exist and the binary would be PIE
+(so `win`'s address is randomized) with a stack canary (so the linear overflow
+aborts first). Then you'd need the Chapter 12/13 techniques: leak an address to
+defeat PIE, leak the canary, and build a ROP chain instead of a single address.
+The *offset* and the *overflow* are identical; only what you place after the
+offset changes.
 
 ---
 
@@ -283,10 +361,37 @@ void f(char *src){
         buf[i] = src[i];
 }
 ```
-A single byte past the buffer can overwrite the **low byte of the saved RBP**
-("frame-pointer overwrite"), which on the next `leave; ret` pivots the stack to
-an attacker-influenced location. One byte is enough to matter — see also the
-"poison NUL byte" heap variant (Chapter 4).
+**The bug is the `<=`.** A loop that should copy 16 bytes (`i` from 0 to 15)
+instead runs `i` from 0 to 16 *inclusive* — 17 iterations — because of `<=`
+instead of `<`. The extra write, `buf[16] = src[16]`, lands one byte past the end
+of `buf`. This "fencepost error" (named after the "how many posts for a 10-metre
+fence?" puzzle) is one of the most common real bugs, and it looks completely
+innocent in a code review.
+
+**Why one byte can be enough.** It depends on what sits in that one byte just
+above `buf`. If `buf` ends exactly where the **saved RBP** begins, `buf[16]`
+overwrites the **least-significant byte of the saved RBP**. Recall from Chapter 1
+that the function epilogue is `leave` (= `mov rsp, rbp ; pop rbp`) then `ret`.
+After this function returns, its *caller* eventually runs its own `leave`, which
+does `mov rsp, rbp` using the RBP we just corrupted — so the caller's stack
+pointer is now pointing a bit lower/higher than it should, into memory the
+attacker influenced. The caller's subsequent `ret` then reads its "return
+address" from that shifted location. With careful setup an attacker uses this
+"frame-pointer overwrite" / "stack pivot" to redirect execution even though they
+only changed **one byte**.
+
+Even when it isn't the saved RBP, a one-byte overwrite of an adjacent length or
+flag (as in test case 2) can be decisive. The heap has an even more famous
+one-byte bug — the "poison NUL byte," where a stray terminator corrupts the next
+chunk's size (Chapter 4).
+
+**The fix.** Use `<` and reserve room for the terminator:
+```c
+for (size_t i = 0; i + 1 < sizeof buf && src[i]; i++) buf[i] = src[i];
+buf[i] = '\0';          // always leave space for the NUL
+```
+Compile-time help: `-fsanitize=address` flags the 1-byte write immediately, and
+`-fstack-protector-strong` turns a saved-RBP overwrite into a detected abort.
 
 ---
 
@@ -299,8 +404,35 @@ strncpy(buf, src, sizeof buf);   // if strlen(src) >= 16, buf is NOT terminated
 printf("%s", buf);               // prints past buf -> OOB read / leak
 buf[strlen(buf)] = '!';          // strlen walks past -> OOB write
 ```
-`strncpy` does **not** guarantee NUL termination — a classic footgun. Always
-terminate explicitly (`buf[sizeof buf - 1] = 0;`) or use `snprintf`.
+**The subtle trap.** Programmers reach for `strncpy` thinking "the `n` makes it
+safe." But `strncpy(dst, src, n)` has a surprising rule: it copies at most `n`
+bytes, and it only writes a terminating NUL **if `src` is shorter than `n`**. If
+`src` is `n` bytes or longer, it copies exactly `n` bytes and stops — leaving
+`dst` **with no `\0` at the end**. So `buf` is now a 16-byte blob of characters
+with no terminator.
+
+**Why that is dangerous — two separate bugs follow.** A C string is "characters
+until a `\0`." If there's no `\0` inside `buf`, every function that looks for one
+keeps reading *past* `buf` into neighboring memory until it happens to find a
+zero byte somewhere:
+- `printf("%s", buf)` reads and prints those neighboring bytes — an
+  **out-of-bounds read / information leak** (it dumps whatever is on the stack
+  after `buf`, possibly a canary or a pointer).
+- `strlen(buf)` returns a length longer than 16, so `buf[strlen(buf)] = '!'`
+  writes `'!'` at some offset *past* `buf` — an **out-of-bounds write** whose
+  position you don't control.
+
+So a "safe-looking" `strncpy` quietly becomes both a leak and a corruption.
+
+**The fix.** Either terminate explicitly after `strncpy`, or use a function that
+always terminates:
+```c
+strncpy(buf, src, sizeof buf - 1);
+buf[sizeof buf - 1] = '\0';          // guarantee termination
+// or simply:
+snprintf(buf, sizeof buf, "%s", src); // always NUL-terminates, never overruns
+```
+(On BSD/macOS, `strlcpy` always terminates and is the intended replacement.)
 
 ---
 
@@ -318,8 +450,36 @@ void recv_blob(void){
         buf[i] = getchar();
 }
 ```
-`n = 200` overflows `buf` by 136 bytes. Length fields read from files/network are
-the #1 source of real overflows; **always validate `n` against the real size.**
+**Why this is the most important shape to recognize.** In real software the
+overflow length almost never comes from `strlen` of a local string — it comes
+from **a number the attacker supplies**: a "content-length" header, a record
+count in a file, a field in a network packet. Here `scanf("%d", &n)` reads that
+number straight from input, and the loop then writes `n` bytes into a 64-byte
+buffer with no check. The attacker simply sends `n = 200` and writes 136 bytes
+past `buf` — through the saved RBP and return address — with full control over
+the content (each `getchar()` byte).
+
+This is exactly the bug in the **login-server walkthrough**
+([`walkthroughs/01-login-server`](walkthroughs/01-login-server/WALKTHROUGH.md))
+and in real CVEs like Heartbleed (a length field trusted without checking,
+Chapter 9 / cve-labs) — the pattern is everywhere a program reads "how many" from
+an untrusted source.
+
+**Two things to notice about the code:**
+- `n` is a signed `int`. If the attacker sends a *negative* number, the
+  comparison `i < n` is immediately false (no iterations) — but if `n` were later
+  used as a `size_t` in a `memcpy`, a negative value becomes a gigantic unsigned
+  length (Chapter 8). Mixing signed input with unsigned sizes is its own bug.
+- There is no upper bound at all. The only correct version checks `n` against the
+  real capacity *before* the loop.
+
+**The fix.**
+```c
+if (n < 0 || n > (int)sizeof buf) { /* reject */ return; }
+for (int i = 0; i < n; i++) buf[i] = getchar();
+```
+Validate every length/count from input against the actual destination size, as
+the first thing you do with it.
 
 ---
 
@@ -333,8 +493,30 @@ void handle(char *src, size_t srclen){
 }
 // also: read(fd, buf, attacker_len);  recv(fd, buf, big);
 ```
-`memcpy`/`memmove`/`read`/`recv` are only as safe as the length you pass. The fix
-is `memcpy(buf, src, srclen < sizeof buf ? srclen : sizeof buf)` or reject early.
+**The lesson beginners miss: "safe-looking" functions are not safe.** `memcpy`,
+`memmove`, `read`, and `recv` all take an explicit length, so they *feel* safer
+than `strcpy`. But they copy **exactly the length you give them**, no more and no
+less — they do not know or check the size of the destination. If that length came
+from the attacker (here `srclen` is a parameter ultimately fed from the wire),
+then a length larger than `sizeof buf` overflows `buf[128]` just as thoroughly as
+`gets` would. The function did its job correctly; the *caller* passed a bad size.
+
+This is why "we use `memcpy` with a length, so we're fine" is a false sense of
+security. The length is the thing that must be validated, every time, against the
+real destination capacity.
+
+A second subtlety: with `read`/`recv`, the return value tells you how many bytes
+were *actually* read, and it can be `-1` on error. Passing a buffer size that's
+too big is one bug; using the *return value* without checking for `-1` (which
+becomes a huge number if treated as unsigned) is a second (Chapter 8).
+
+**The fix.** Clamp to the destination, or reject anything too big:
+```c
+if (srclen > sizeof buf) return -1;      // reject (preferred: don't silently truncate)
+memcpy(buf, src, srclen);
+// or clamp when truncation is acceptable:
+memcpy(buf, src, srclen < sizeof buf ? srclen : sizeof buf);
+```
 
 ---
 
@@ -347,7 +529,26 @@ scanf("%s", buf);                    // unbounded; use "%7s"
 sprintf(buf, "Hello %s", name);      // format expansion overflows; use snprintf
 strcat(buf, suffix);                 // appends with no size check; use strlcat
 ```
-All three are the same bug wearing different names: no destination-size awareness.
+**Each line, and why it overflows:**
+- `scanf("%s", buf)` — `%s` reads characters until whitespace with **no limit**,
+  identical in danger to `gets`. The fix is a *field width*: `%7s` reads at most
+  7 characters into an 8-byte buffer (width = size − 1, leaving room for the
+  NUL). Beginners forget the width constantly.
+- `sprintf(buf, "Hello %s", name)` — `sprintf` expands the format and writes the
+  result with no size limit. Even if `buf` could hold `"Hello "`, a long `name`
+  blows past it. `snprintf(buf, sizeof buf, ...)` is the bounded version.
+- `strcat(buf, suffix)` — `strcat` finds the end of whatever is already in `buf`
+  and appends `suffix` after it, again with no awareness of `buf`'s capacity. If
+  `buf` is already half full and `suffix` is long, you overflow. The bounded
+  cousin is `strlcat` (BSD) or computing the remaining room yourself:
+  `strncat(buf, suffix, sizeof buf - strlen(buf) - 1)`.
+
+All three are the same root cause as `gets`: **the function has no idea how big
+the destination is**, so the programmer must supply (and respect) that size. The
+reason there are so many of these functions is historical — the original C
+library predates any bounds-checking convention. Learn to spot the whole family:
+`gets, strcpy, strcat, sprintf, vsprintf, scanf("%s"), gets_s`-misuse — and
+replace each with its size-taking counterpart.
 
 ---
 
@@ -361,9 +562,29 @@ int main(int argc, char **argv){
     // env too: strcpy(buf, getenv("HOME"));
 }
 ```
-Local setuid binaries are attacked exactly this way — the attacker fully controls
-`argv`/`envp`. (Historically, long env vars were also used to *place* shellcode
-at a predictable address.)
+**Why command-line input counts as "attacker-controlled."** It's easy to think
+"`argv[1]` is just what the user typed, that's not an attack." But consider a
+**setuid-root** program (one that runs as root no matter who launches it, like
+`sudo`, `ping`, or `passwd`). An ordinary unprivileged user launches it and
+**fully controls its `argv` and environment variables**. So `strcpy(path,
+argv[1])` with a 4000-byte `argv[1]` lets that user overflow `path[64]` inside a
+root process — and a successful control-flow hijack then runs code *as root*.
+That is **local privilege escalation**, and it's exactly how real bugs like sudo
+Baron Samedit (cve-labs/03) were reached. The environment (`getenv("HOME")`,
+etc.) is equally attacker-controlled and equally dangerous.
+
+**Historical bonus.** Before ASLR, attackers also used **long environment
+variables** as a convenient place to *store* their shellcode: env vars live near
+the top of the stack at a fairly predictable address, so you could stuff shellcode
+into `EGG=<nops><shellcode>` and jump to roughly where it landed. ASLR
+(Chapter 13) killed that predictability.
+
+**The fix.** Treat `argv`/`envp` like any other untrusted input — bound the copy:
+```c
+snprintf(path, sizeof path, "%s", argv[1]);
+```
+and, for setuid programs, sanitize the environment and drop privileges as early
+as possible.
 
 ---
 
@@ -377,9 +598,26 @@ void f(int n){
 }
 void g(int n){ char vla[n]; ... }   // same problem (C99 VLA)
 ```
-`alloca`/VLAs move `rsp` by an attacker-controlled amount → stack clash /
-corruption. Avoid attacker-sized stack allocations entirely; use the heap with
-checks, and compile with `-fstack-clash-protection`.
+**What `alloca`/VLAs actually do.** Normal locals have a fixed size the compiler
+knows, so it reserves space with one `sub rsp, <constant>` in the prologue
+(Chapter 1 §1.6). `alloca(n)` and C99 variable-length arrays (`char vla[n]`)
+instead reserve space **at runtime** by subtracting a *runtime* value from `rsp`:
+`sub rsp, n`. If `n` is attacker-controlled, the attacker controls **how far the
+stack pointer jumps**.
+
+**Why that's dangerous — the "stack clash."** The stack has a limited region and
+is followed (at lower addresses) by a guard page and then other mappings (the
+heap, libraries). A huge `n` moves `rsp` so far down that it **skips over the
+guard page** and lands in, or past, another mapping. Now writes intended for the
+"array" actually land in unrelated memory — the stack and heap *collide*. This is
+the **Stack Clash** class (CVE-2017-1000364 and friends). A negative or
+absurdly-large `n` can also simply corrupt the frame or crash.
+
+**The fix.** Don't make stack allocations depend on untrusted sizes. Use a fixed
+maximum, or allocate on the **heap** with a checked size (and handle allocation
+failure). Compile with **`-fstack-clash-protection`**, which makes the compiler
+"probe" each page as it grows the stack so the guard page can never be jumped
+over silently.
 
 ---
 
@@ -391,8 +629,28 @@ int table[10];
 int idx; scanf("%d", &idx);
 table[idx] = 0x41414141;   // idx=50 or -3 writes far outside table
 ```
-An unchecked **index** is a direct "write-what-where" into the stack/globals. Both
-positive and **negative** indices are dangerous. Always `if ((unsigned)idx < 10)`.
+**Why an unchecked index is even more powerful than a plain overflow.** A normal
+overflow writes *sequentially* past the end of a buffer — you corrupt neighbors
+in order. An unchecked **index** lets the attacker pick the offset directly:
+`table[idx] = value` computes `address_of_table + idx * sizeof(int)` and writes
+there. By choosing `idx`, the attacker chooses *which* memory box to hit, and
+(here) the value too. That's close to the ultimate primitive — a
+**"write-what-where."**
+
+**Both directions are dangerous.** `idx = 50` writes 50 elements *past* `table`
+(into whatever is at higher addresses); `idx = -3` writes *before* `table` (lower
+addresses). Negative indices surprise people because `arr[-3]` is perfectly legal
+C — it's just `*(arr + (-3))`. So a signed index you forgot to lower-bound is a
+bug even if you checked the upper bound.
+
+**The one-line fix, and why the cast matters.**
+```c
+if ((unsigned)idx < 10) table[idx] = value;   // else reject
+```
+Casting `idx` to `unsigned` folds *both* checks into one: a negative `idx`
+becomes a huge unsigned number, which fails `< 10`, so the single comparison
+rejects negatives and too-large values at once. (This is the standard idiom; just
+make sure `10` is the real element count.)
 
 ---
 
@@ -403,9 +661,28 @@ positive and **negative** indices are dangerous. Always `if ((unsigned)idx < 10)
 struct conn { char name[32]; void (*cb)(void); };
 void setname(struct conn *c, char *s){ strcpy(c->name, s); }  // overflows into cb
 ```
-Overflowing `name` overwrites the **function pointer `cb`** that follows it in the
-struct — the local-object analogue of a return-address overwrite. Reordering
-fields (pointer first) or bounding the copy fixes it.
+**Why this one is especially nasty.** Fields of a struct are laid out in memory
+**in declaration order**, so `cb` sits directly after `name` in the same struct,
+at higher addresses. Overflowing `name` therefore writes straight into `cb` — and
+`cb` is a **function pointer the program will later call** (`c->cb()`). So the
+attacker doesn't even need the return address or the stack frame: overwrite `cb`
+with the address of their choosing, and the program itself calls it the next time
+it invokes the callback. This is the same idea as a C++ object's vtable pointer
+(Chapter 10) and as the heap function-pointer overwrite (Chapter 4).
+
+A struct like this can live **anywhere** — on the stack, on the heap, or as a
+global — and the bug is identical in each case, which is why this pattern shows
+up across all the memory regions.
+
+**Two fixes, and the trade-off:**
+- **Bound the copy** (always correct): `snprintf(c->name, sizeof c->name, "%s",
+  s)` so the write can never reach `cb`.
+- **Reorder fields** so the pointer comes *before* the buffer: then an overflow
+  of `name` runs off the end of the struct into other memory rather than into
+  `cb` first. This is a hardening nicety, *not* a substitute for bounding — the
+  overflow still happens, it just doesn't immediately hit the code pointer.
+Compilers/CFI (`-fsanitize=cfi`) can also catch a call through a corrupted
+pointer at runtime (Chapter 13).
 
 ---
 
