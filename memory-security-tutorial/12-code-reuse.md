@@ -150,11 +150,44 @@ set rdx = 0                    via  pop rdx ; ret ; 0
 invoke                         via  syscall ; ret
 ```
 
+**Let's lay that chain out on the stack byte-for-byte**, because "put the gadget
+addresses on the stack" is the part that confuses everyone at first. After the
+overflow, starting at the saved-return-address slot, the stack contains (reading
+upward, one 8-byte slot per line):
+
+```
+   [ addr of `pop rdi ; ret` ]   <- ret jumps here first
+   [ &"/bin/sh"              ]   <- `pop rdi` loads THIS into rdi, then its `ret`...
+   [ addr of `pop rsi ; ret` ]   <- ...jumps here
+   [ 0                       ]   <- popped into rsi
+   [ addr of `pop rdx ; ret` ]
+   [ 0                       ]   <- popped into rdx
+   [ addr of `pop rax ; ret` ]
+   [ 59                      ]   <- popped into rax (SYS_execve)
+   [ addr of `syscall`       ]   <- all registers set -> execve("/bin/sh",0,0)
+```
+
+Trace the control flow to see the self-propelling trick:
+1. The function's `ret` pops the first slot → jumps to `pop rdi ; ret`.
+2. `pop rdi` pops the **next** slot (`&"/bin/sh"`) into `rdi`. That consumes it,
+   so `rsp` now points at the `pop rsi ; ret` address.
+3. That gadget's own `ret` pops it → jumps to `pop rsi ; ret`.
+4. ...and so on. **Each gadget does a little work, then its `ret` launches the
+   next**, because every gadget address and its data are pre-placed on the stack
+   in order. You never jump "into" anything new — the stack is driving.
+
+By the last line, `rdi/rsi/rdx/rax` all hold what the `execve` syscall needs, and
+`syscall` runs it → a shell. Notice we called **no function**; we only used the
+ABI argument registers (Chapter 1 §1.7) and the syscall instruction, assembled
+from fragments.
+
 Each line is one gadget address + its data on the stack. ROP is **Turing-
-complete** given a rich enough gadget set; in practice you only need enough to set
-up one syscall or `system`. **JOP** (jump-oriented programming) is the variant
-using `jmp`-ending gadgets when `ret`s are scarce/guarded (e.g. under shadow
-stacks).
+complete** given a rich enough gadget set (there are gadgets to add, load, store,
+branch — enough to compute anything); in practice you only need enough to set up
+one syscall or a `system` call. **JOP** (jump-oriented programming) is the variant
+using `jmp`-ending gadgets instead of `ret`-ending ones, used when `ret`s are
+scarce or guarded (e.g. under a shadow stack / Intel CET, Chapter 13, which
+specifically breaks the `ret`-chaining trick above).
 
 ---
 

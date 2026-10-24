@@ -135,6 +135,42 @@ void release(struct obj *o){ if (atomic_dec_and_test(&o->ref)) kfree(o); }
 //      -> an extra release() frees o while still referenced -> UAF
 ```
 
+**Why the kernel heap is *easier* to exploit than userspace, step by step.**
+This is the deep reason kernel UAF dominates LPE:
+
+1. **The slab groups objects by size/type into caches.** The SLUB allocator
+   keeps per-type caches (`kmalloc-64`, `kmalloc-256`, dedicated caches for
+   `cred`, `file`, etc.). Objects of the same size come from the same cache and
+   are reused LIFO — just like tcache (Chapter 3), but even more predictable
+   because the kernel is one big long-lived process with well-known object sizes.
+2. **The attacker has a rich menu of "spray" objects.** From userspace, specific
+   syscalls allocate kernel objects of attacker-chosen **size** and partly
+   attacker-chosen **contents**: `msg_msg` (System V message queues — nearly
+   arbitrary size and contents, hence "elastic"), `sk_buff` (network buffers),
+   `setxattr`/`user_key_payload` (controlled bytes), `pipe_buffer`, etc. So after
+   freeing the victim, the attacker calls such a syscall with the victim's exact
+   size to **reclaim the freed slot with bytes they control** — the Chapter 6
+   reclaim, but with a reliable, scriptable spray primitive built into the
+   kernel's own API.
+3. **The reclaimed object is full of *pointers the kernel will use*.** Kernel
+   objects are thick with function-pointer tables (`file_operations`,
+   `proto_ops`, `->release`, etc.). Overwriting one with the spray and then
+   triggering the dangling reference's callback redirects **kernel** control flow.
+4. **The prize is `struct cred`.** The classic finish is to corrupt a process's
+   credential structure (set uid/gid to 0) or to call
+   `commit_creds(prepare_kernel_cred(NULL))` — turning the calling process into
+   root. No file to overwrite, no service to restart: instant privilege
+   escalation.
+
+**Reference counting is the usual root cause** (`refcount_t` under/overflow,
+`kref` misuse). The `k04` snippet shows the canonical form: a code path hands out
+a pointer to `o` without the matching `atomic_inc`, so the count is one too low
+and a later `release` frees `o` while a user still holds it. Because kernels are
+massively concurrent, a **race** on the increment/decrement (Chapter 11) produces
+the same under-count. The kernel introduced **`refcount_t`** — atomic *and*
+**saturating** (it refuses to wrap past 0 or the max and warns) — specifically to
+convert these silent under/overflows into loud, non-exploitable failures.
+
 ---
 
 ## 14.4 Other kernel-specific shapes

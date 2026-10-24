@@ -81,10 +81,48 @@ In assembly:
 **Enable:** `-fstack-protector-strong` (distro default). Check: `checksec` shows
 "Canary found". The low byte of the canary is `\x00` to stop string-based leaks.
 
-**Bypassed by:** leaking the canary (format string `%p`, OOB read) and including
-it in the payload; overwrites that **don't cross** the canary (adjacent local, a
-pointer used before return — Chapter 2 test 2); byte-by-byte **brute force** on
-forking servers (child keeps the parent's canary).
+**How it actually stops the attack.** A buffer overflow writes *upward*,
+contiguously, from the buffer toward the return address (Chapter 2). The canary
+sits *between* them, so a linear overflow that wants to reach the return address
+**must write through the canary slot first**, changing its value. The epilogue
+re-reads that slot and compares it to the real canary (kept safe in thread-local
+storage at `fs:0x28`); any mismatch calls `__stack_chk_fail`, which prints
+`*** stack smashing detected ***` and aborts **before** the `ret` ever uses the
+corrupted return address. So the attacker's hijack never happens — the program
+dies cleanly instead.
+
+**Why the low byte is `\x00`.** The canary's least-significant byte is forced to
+`00`. Since most overflows come from string functions that stop at a NUL, this
+means a string-based overflow that *reads* toward the canary tends to stop at
+that `00`, making the canary harder to leak via naive string bugs. It's a small
+hardening on top of the main mechanism.
+
+**The three bypasses, and the reasoning behind each:**
+1. **Leak it, then replay it.** The canary only works because the attacker
+   *doesn't know its value*. If a **separate info-leak bug** (a format string
+   `%p`, Chapter 7; an OOB read, Chapter 9) reveals the canary, the attacker
+   simply includes that exact value at the canary's position in the overflow
+   payload. The epilogue compares "canary" to "same canary" → match → no abort,
+   and the overwritten return address beyond it still takes effect. This is why
+   real exploits are "leak **then** smash."
+2. **Don't cross the canary at all.** The canary only guards the path to the
+   *return address*. If the function uses attacker-corruptible data *before* it
+   returns — an adjacent local flag (Chapter 2 test 2), or a **function pointer /
+   C++ vtable pointer** the function calls — you hijack via that, and `ret` (and
+   its check) is never reached. Likewise a bug that writes to a chosen index
+   (not a contiguous overflow) can overwrite the return address *without*
+   touching the canary.
+3. **Brute force on forking servers.** A server that `fork()`s to handle each
+   connection gives every child the **same** canary as the parent (fork copies
+   memory; the canary isn't re-randomized). So an attacker overwrites one canary
+   byte at a time: a wrong guess crashes the child (but the server keeps
+   running), a right guess doesn't — 256 tries per byte, 8 bytes = ~2048
+   connections to recover the whole canary. Only works where crashes are cheap
+   and the canary is stable across children.
+
+**The takeaway:** a canary turns a *simple linear stack overflow* from "instant
+RCE" into "need a second (leak) bug or a non-linear primitive." It raises the
+cost; it doesn't remove the bug.
 
 ---
 
